@@ -32,10 +32,12 @@ import net.fabricmc.fabric.api.event.player.AttackBlockCallback
 import net.fabricmc.fabric.api.event.player.PlayerBlockBreakEvents
 import net.fabricmc.fabric.api.event.player.UseBlockCallback
 import net.fabricmc.fabric.api.event.player.UseItemCallback
+import net.fabricmc.fabric.api.networking.v1.PlayerLookup
 import net.fabricmc.fabric.api.networking.v1.ServerPlayConnectionEvents
 import net.minecraft.core.component.DataComponentPatch
 import net.minecraft.core.component.DataComponents
 import net.minecraft.nbt.CompoundTag
+import net.minecraft.network.chat.Component
 import net.minecraft.server.level.ServerLevel
 import net.minecraft.server.level.ServerPlayer
 import net.minecraft.world.InteractionHand
@@ -281,8 +283,8 @@ object CratesManager {
         tag.putString(CRATE_IDENTIFIER, crate.id)
         item.applyComponents(
             DataComponentPatch.builder()
-            .set(DataComponents.CUSTOM_DATA, CustomData.of(tag))
-            .build())
+                .set(DataComponents.CUSTOM_DATA, CustomData.of(tag))
+                .build())
 
         // Add to player's inventory
         player.inventory.placeItemBackInInventory(item)
@@ -313,6 +315,17 @@ object CratesManager {
                 player.sendMessage(crate.parsePlaceholders(it).asNative(player))
             }
             return false
+        }
+
+        // Check if ANY player is opening the crate - This would mean only 1 player can open at a time
+        PlayerLookup.tracking(player.serverLevel(), openData.location?.getBlockPos()).forEach { serverPlayer ->
+            if(OpeningManager.getInstance(serverPlayer.uuid) != null && OpeningManager.getInstance(serverPlayer.uuid)?.crate?.block?.locations?.any{it.getDimensionalBlockPos().equals(openData.location)} == true) {
+                handleCrateFail(player, crate, openData)
+                Lang.ERROR_ALREADY_OPENING.forEach {
+                    player.sendMessage(Component.literal("§cPlease wait! Crate is in use by someone else!"))
+                }
+                return false
+            }
         }
 
         // Permission check
@@ -435,7 +448,7 @@ object CratesManager {
                         KeyCheckResult.SUCCESS -> {}
                     }
                     true
-            }) return false
+                }) return false
         }
 
         // Check for crate item
@@ -487,21 +500,68 @@ object CratesManager {
             if (crate.keys.isNotEmpty()) {
                 // TODO: I dont like this code very much, but need to figure out a better way
                 if (!withContext(MinecraftDispatcher(player.server)) {
-                    for ((keyId, amount) in crate.keys) {
-                        var removed = 0
-                        val key = ConfigManager.KEYS[keyId] ?: run {
-                            Utils.printError("Key $keyId does not exist while opening crate ${crate.id} for ${player.name.string}!")
-                            Lang.ERROR_KEY_NOT_FOUND.forEach {
-                                player.sendMessage(crate.parsePlaceholders(
-                                    it.replace("%key_id%", keyId)
-                                ).asNative(player))
+                        for ((keyId, amount) in crate.keys) {
+                            var removed = 0
+                            val key = ConfigManager.KEYS[keyId] ?: run {
+                                Utils.printError("Key $keyId does not exist while opening crate ${crate.id} for ${player.name.string}!")
+                                Lang.ERROR_KEY_NOT_FOUND.forEach {
+                                    player.sendMessage(crate.parsePlaceholders(
+                                        it.replace("%key_id%", keyId)
+                                    ).asNative(player))
+                                }
+                                return@withContext false
                             }
-                            return@withContext false
-                        }
 
-                        if (key.virtual) {
-                            if (!playerData.removeKeys(key, amount)) {
-                                Utils.printError("Failed to remove $amount keys from ${player.name.string} for crate ${crate.id}, but they were present in the check!")
+                            if (key.virtual) {
+                                if (!playerData.removeKeys(key, amount)) {
+                                    Utils.printError("Failed to remove $amount keys from ${player.name.string} for crate ${crate.id}, but they were present in the check!")
+                                    Lang.ERROR_KEYS_CHANGED.forEach {
+                                        player.sendMessage(crate.parsePlaceholders(
+                                            it.replace("%key_id%", keyId)
+                                        ).asNative(player))
+                                    }
+                                    return@withContext false
+                                }
+                                removed += amount
+                            } else {
+                                val keySlots = player.inventory.items.withIndex().filter { (_, stack) ->
+                                    if (stack.isEmpty) return@filter false
+                                    KeyManager.getKeyOrNull(stack)?.id == keyId
+                                }.associate { (slot, stack) -> slot to stack }.toMutableMap()
+
+                                player.offhandItem.let { offhand ->
+                                    if (!offhand.isEmpty && KeyManager.getKeyOrNull(offhand)?.id == keyId) {
+                                        keySlots[Inventory.SLOT_OFFHAND] = offhand
+                                    }
+                                }
+
+                                // convert keySlots into a keys list that is sorted by slot number, with player.inventory.selected and Inventory.SLOT_OFFHAND first
+                                val sortedKeys = keySlots.entries.sortedBy { (slot, _) ->
+                                    when (slot) {
+                                        player.inventory.selected -> -2
+                                        Inventory.SLOT_OFFHAND -> -1
+                                        else -> slot
+                                    }
+                                }.map { (_, stack) -> stack }
+
+                                for (stack in sortedKeys) {
+                                    val stackSize = stack.count
+                                    if (removed + stackSize >= amount) {
+                                        KeyManager.markStackUsed(stack, key, keyId, player)
+                                        stack.shrink(amount - removed)
+                                        removed += (amount - removed)
+                                        break
+                                    } else {
+                                        KeyManager.markStackUsed(stack, key, keyId, player)
+                                        stack.shrink(stackSize)
+                                        removed += stackSize
+                                    }
+                                }
+                            }
+
+                            if (removed != amount) {
+                                // This should never happen, but just in case
+                                Utils.printError("Somehow the ${player.name.string} had $amount keys on check, but we removed $removed instead!")
                                 Lang.ERROR_KEYS_CHANGED.forEach {
                                     player.sendMessage(crate.parsePlaceholders(
                                         it.replace("%key_id%", keyId)
@@ -509,56 +569,9 @@ object CratesManager {
                                 }
                                 return@withContext false
                             }
-                            removed += amount
-                        } else {
-                            val keySlots = player.inventory.items.withIndex().filter { (_, stack) ->
-                                if (stack.isEmpty) return@filter false
-                                KeyManager.getKeyOrNull(stack)?.id == keyId
-                            }.associate { (slot, stack) -> slot to stack }.toMutableMap()
-
-                            player.offhandItem.let { offhand ->
-                                if (!offhand.isEmpty && KeyManager.getKeyOrNull(offhand)?.id == keyId) {
-                                    keySlots[Inventory.SLOT_OFFHAND] = offhand
-                                }
-                            }
-
-                            // convert keySlots into a keys list that is sorted by slot number, with player.inventory.selected and Inventory.SLOT_OFFHAND first
-                           val sortedKeys = keySlots.entries.sortedBy { (slot, _) ->
-                               when (slot) {
-                                   player.inventory.selected -> -2
-                                   Inventory.SLOT_OFFHAND -> -1
-                                   else -> slot
-                               }
-                           }.map { (_, stack) -> stack }
-
-                            for (stack in sortedKeys) {
-                                val stackSize = stack.count
-                                if (removed + stackSize >= amount) {
-                                    KeyManager.markStackUsed(stack, key, keyId, player)
-                                    stack.shrink(amount - removed)
-                                    removed += (amount - removed)
-                                    break
-                                } else {
-                                    KeyManager.markStackUsed(stack, key, keyId, player)
-                                    stack.shrink(stackSize)
-                                    removed += stackSize
-                                }
-                            }
                         }
-
-                        if (removed != amount) {
-                            // This should never happen, but just in case
-                            Utils.printError("Somehow the ${player.name.string} had $amount keys on check, but we removed $removed instead!")
-                            Lang.ERROR_KEYS_CHANGED.forEach {
-                                player.sendMessage(crate.parsePlaceholders(
-                                    it.replace("%key_id%", keyId)
-                                ).asNative(player))
-                            }
-                            return@withContext false
-                        }
-                    }
-                    return@withContext true
-                }) return false
+                        return@withContext true
+                    }) return false
             }
 
             // Take crate item, if it was an inventory open

@@ -14,6 +14,7 @@ import com.pokeskies.skiescrates.managers.HologramsManager
 import com.pokeskies.skiescrates.mixins.EntityAccessor
 import com.pokeskies.skiescrates.mixins.ItemEntityAccessor
 import com.pokeskies.skiescrates.utils.asNative
+import net.fabricmc.fabric.api.networking.v1.PlayerLookup
 import net.minecraft.network.protocol.game.ClientboundAddEntityPacket
 import net.minecraft.network.protocol.game.ClientboundRemoveEntitiesPacket
 import net.minecraft.network.protocol.game.ClientboundSetEntityDataPacket
@@ -88,7 +89,9 @@ class SimpleRollWorldAnimation(
         pos = opening.instance.pos.bottomCenter.add(offset.toVec3())
 
         if (hideHologram && ModIntegration.HOLODISPLAYS.isModLoaded()) {
-            HologramsManager.hideHologramForPlayer(opening.player, opening.instance)
+            PlayerLookup.tracking(opening.instance.level, opening.instance.pos).forEach { serverPlayer ->
+                HologramsManager.hideHologramForPlayer(serverPlayer, opening.instance)
+            }
         }
     }
 
@@ -136,10 +139,14 @@ class SimpleRollWorldAnimation(
     }
 
     override fun stop(opening: WorldOpeningInstance) {
-        opening.player.connection.send(ClientboundRemoveEntitiesPacket(itemEntity!!.id))
+        PlayerLookup.tracking(opening.instance.level, opening.instance.pos).forEach { serverPlayer ->
+            serverPlayer.connection.send(ClientboundRemoveEntitiesPacket(itemEntity!!.id))
+        }
 
         if (hideHologram && ModIntegration.HOLODISPLAYS.isModLoaded()) {
-            HologramsManager.showHologramForPlayer(opening.player, opening.instance)
+            PlayerLookup.tracking(opening.instance.level, opening.instance.pos).forEach { serverPlayer ->
+                HologramsManager.showHologramForPlayer(serverPlayer, opening.instance)
+            }
         }
     }
 
@@ -154,38 +161,44 @@ class SimpleRollWorldAnimation(
                     pos,
                     newReward.getDisplayItem(opening.player)
                 )
-                opening.player.connection.send(
-                    ClientboundAddEntityPacket(
-                        itemEntity!!.id,
-                        itemEntity!!.uuid,
-                        pos.x,
-                        pos.y,
-                        pos.z,
-                        0f,
-                        0f,
-                        EntityType.ITEM,
-                        0,
-                        Vec3.ZERO,
-                        0.0
+                PlayerLookup.tracking(opening.instance.level, opening.instance.pos).forEach { serverPlayer ->
+                    serverPlayer.connection.send(
+                        ClientboundAddEntityPacket(
+                            itemEntity!!.id,
+                            itemEntity!!.uuid,
+                            pos.x,
+                            pos.y,
+                            pos.z,
+                            0f,
+                            0f,
+                            EntityType.ITEM,
+                            0,
+                            Vec3.ZERO,
+                            0.0
+                        )
                     )
-                )
-                opening.player.connection.send(ClientboundSetEntityDataPacket(itemEntity!!.id, listOf(
-                    SynchedEntityData.DataValue.create(EntityAccessor.getNoGravity(), true),
-                    SynchedEntityData.DataValue.create(EntityAccessor.getCustomName(), Optional.of(newReward.name.asNative())),
-                    SynchedEntityData.DataValue.create(EntityAccessor.getCustomNameVisible(), true),
-                    SynchedEntityData.DataValue.create(ItemEntityAccessor.getItem(), itemEntity!!.item)
-                )))
+                    serverPlayer.connection.send(ClientboundSetEntityDataPacket(itemEntity!!.id, listOf(
+                        SynchedEntityData.DataValue.create(EntityAccessor.getNoGravity(), true),
+                        SynchedEntityData.DataValue.create(EntityAccessor.getCustomName(), Optional.of(newReward.name.asNative())),
+                        SynchedEntityData.DataValue.create(EntityAccessor.getCustomNameVisible(), true),
+                        SynchedEntityData.DataValue.create(ItemEntityAccessor.getItem(), itemEntity!!.item)
+                    )))
+                }
             } else {
                 itemEntity!!.item = newReward.getDisplayItem(opening.player)
-                opening.player.connection.send(ClientboundSetEntityDataPacket(itemEntity!!.id, listOf(
-                    SynchedEntityData.DataValue.create(EntityAccessor.getCustomName(), Optional.of(newReward.name.asNative())),
-                    SynchedEntityData.DataValue.create(ItemEntityAccessor.getItem(), itemEntity!!.item)
-                )))
+                PlayerLookup.tracking(opening.instance.level, opening.instance.pos).forEach { serverPlayer ->
+                    serverPlayer.connection.send(ClientboundSetEntityDataPacket(itemEntity!!.id, listOf(
+                        SynchedEntityData.DataValue.create(EntityAccessor.getCustomName(), Optional.of(newReward.name.asNative())),
+                        SynchedEntityData.DataValue.create(ItemEntityAccessor.getItem(), itemEntity!!.item)
+                    )))
+                }
             }
         }
 
         // Play sound
-        sound?.playSound(opening.player)
+        PlayerLookup.tracking(opening.instance.level, opening.instance.pos).forEach { serverPlayer ->
+            sound?.playSound(serverPlayer)
+        }
     }
 
     private fun generateItem(opening: WorldOpeningInstance): Reward? {
