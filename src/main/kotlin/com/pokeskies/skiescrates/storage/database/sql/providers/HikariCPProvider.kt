@@ -29,31 +29,6 @@ abstract class HikariCPProvider(private val storageConfig: SkiesCratesConfig.Sto
         config.maxLifetime = storageConfig.poolSettings.maxLifetime
 
         dataSource = HikariDataSource(config)
-
-        try {
-            createConnection().use {
-                val statement = it.createStatement()
-                statement.executeUpdate(
-                "CREATE TABLE IF NOT EXISTS ${storageConfig.tablePrefix}userdata (" +
-                        "uuid VARCHAR(36) NOT NULL, " +
-                        "crates TEXT NOT NULL, " +
-                        "`keys` TEXT NOT NULL, " +
-                        "PRIMARY KEY (uuid)" +
-                    ")"
-                )
-                statement.executeUpdate(
-                    "CREATE TABLE IF NOT EXISTS ${storageConfig.tablePrefix}used_keys (" +
-                            "uuid VARCHAR(36) NOT NULL, " +
-                            "keyId TEXT NOT NULL, " +
-                            "timeUsed BIGINT NOT NULL, " +
-                            "player VARCHAR(36) NOT NULL, " +
-                            "PRIMARY KEY (uuid)" +
-                            ")"
-                )
-            }
-        } catch (e: SQLException) {
-            e.printStackTrace()
-        }
     }
 
     @Throws(SQLException::class)

@@ -4,12 +4,14 @@ import com.mongodb.ConnectionString
 import com.mongodb.MongoClientSettings
 import com.mongodb.MongoCredential
 import com.mongodb.ServerAddress
+import com.mongodb.MongoWriteException
 import com.mongodb.client.MongoClient
 import com.mongodb.client.MongoClients
 import com.mongodb.client.MongoCollection
 import com.mongodb.client.MongoDatabase
 import com.mongodb.client.model.Filters
 import com.mongodb.client.model.ReplaceOptions
+import com.mongodb.client.model.Updates
 import com.mongodb.connection.ClusterSettings
 import com.pokeskies.skiescrates.SkiesCrates
 import com.pokeskies.skiescrates.config.SkiesCratesConfig
@@ -77,10 +79,35 @@ class MongoStorage(config: SkiesCratesConfig.Storage) : IStorage {
             Utils.printError("There was an error while attempting to save data to the Mongo database!")
             return false
         }
-        val query = Filters.eq("_id", userData.uuid)
-        val result = this.userdataCollection?.replaceOne(query, userData, ReplaceOptions().upsert(true))
+        val expectedVersion = userData.version
+        val versionFilter = if (expectedVersion == 0L) {
+            Filters.or(Filters.eq("version", 0L), Filters.exists("version", false))
+        } else {
+            Filters.eq("version", expectedVersion)
+        }
+        val result = userdataCollection?.updateOne(
+            Filters.and(Filters.eq("_id", userData.uuid), versionFilter),
+            Updates.combine(
+                Updates.set("crates", userData.crates),
+                Updates.set("keys", userData.keys),
+                Updates.set("version", expectedVersion + 1)
+            )
+        ) ?: return false
 
-        return result?.wasAcknowledged() ?: false
+        if (result.wasAcknowledged() && result.matchedCount == 1L) {
+            userData.version = expectedVersion + 1
+            return true
+        }
+        if (expectedVersion != 0L) return false
+
+        return try {
+            val newUserData = UserData(userData).apply { version = 1L }
+            userdataCollection?.insertOne(newUserData)
+            userData.version = newUserData.version
+            true
+        } catch (e: MongoWriteException) {
+            if (e.error.code == 11000) false else throw e
+        }
     }
 
     override fun getUsedKey(uuid: UUID): UsedKeyData? {

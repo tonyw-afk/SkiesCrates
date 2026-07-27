@@ -15,27 +15,56 @@ class FileStorage : IStorage {
         private const val STORAGE_FILENAME = "storage.json"
     }
 
+    @Synchronized
     override fun getUser(uuid: UUID): UserData {
         val userData = fileData.userdata[uuid]
-        return userData ?: UserData(uuid)
+        return userData?.let(::UserData) ?: UserData(uuid)
     }
 
+    @Synchronized
     override fun saveUser(userData: UserData): Boolean {
-        fileData.userdata[userData.uuid] = userData
-        val snapshot = HashMap(fileData.userdata)
-        val fileDataCopy = FileData().apply { userdata = snapshot }
-        return ConfigManager.saveFile(STORAGE_FILENAME, fileDataCopy)
+        val storedUserData = fileData.userdata[userData.uuid]
+        if ((storedUserData?.version ?: 0L) != userData.version) return false
+
+        val updatedUserData = UserData(userData).apply { version++ }
+        fileData.userdata[userData.uuid] = updatedUserData
+        if (saveFileData()) {
+            userData.version = updatedUserData.version
+            return true
+        }
+
+        if (storedUserData == null) {
+            fileData.userdata.remove(userData.uuid)
+        } else {
+            fileData.userdata[userData.uuid] = storedUserData
+        }
+        return false
     }
 
+    @Synchronized
     override fun getUsedKey(uuid: UUID): UsedKeyData? {
-        return fileData.usedKeys[uuid]
+        return fileData.usedKeys[uuid]?.let(::UsedKeyData)
     }
 
+    @Synchronized
     override fun saveUsedKey(usedKeyData: UsedKeyData): Boolean {
-        fileData.usedKeys[usedKeyData.uuid] = usedKeyData
-        val snapshot = HashMap(fileData.usedKeys)
-        val fileDataCopy = FileData().apply { usedKeys = snapshot }
-        return ConfigManager.saveFile(STORAGE_FILENAME, fileDataCopy)
+        val storedUsedKey = fileData.usedKeys.put(usedKeyData.uuid, UsedKeyData(usedKeyData))
+        if (saveFileData()) return true
+
+        if (storedUsedKey == null) {
+            fileData.usedKeys.remove(usedKeyData.uuid)
+        } else {
+            fileData.usedKeys[usedKeyData.uuid] = storedUsedKey
+        }
+        return false
+    }
+
+    private fun saveFileData(): Boolean {
+        val snapshot = FileData().apply {
+            userdata = HashMap(fileData.userdata)
+            usedKeys = fileData.usedKeys.mapValuesTo(HashMap()) { UsedKeyData(it.value) }
+        }
+        return ConfigManager.saveFile(STORAGE_FILENAME, snapshot)
     }
 
     override fun getUserAsync(uuid: UUID): CompletableFuture<UserData> {
