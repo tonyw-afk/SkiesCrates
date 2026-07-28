@@ -13,5 +13,8 @@ class SQLiteProvider(config: SkiesCratesConfig.Storage) : HikariCPProvider(confi
 
     override fun getDriverClassName(): String = "org.sqlite.JDBC"
     override fun getDriverName(): String = "sqlite"
-    override fun configure(config: HikariConfig) {}
+    override fun configure(config: HikariConfig) {
+        config.maximumPoolSize = 1
+        config.minimumIdle = 1
+    }
 }

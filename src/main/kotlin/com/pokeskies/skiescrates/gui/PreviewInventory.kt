@@ -1,16 +1,21 @@
 package com.pokeskies.skiescrates.gui
 
-import com.pokeskies.skiescrates.SkiesCrates
 import com.pokeskies.skiescrates.data.Crate
 import com.pokeskies.skiescrates.data.previews.Preview
 import com.pokeskies.skiescrates.data.rewards.Reward
+import com.pokeskies.skiescrates.data.userdata.UserData
 import com.pokeskies.skiescrates.utils.asNative
 import eu.pb4.sgui.api.elements.GuiElementBuilder
 import eu.pb4.sgui.api.gui.SimpleGui
 import net.minecraft.server.level.ServerPlayer
 import net.minecraft.world.item.ItemStack
 
-class PreviewInventory(player: ServerPlayer, val crate: Crate, val preview: Preview): SimpleGui(
+class PreviewInventory(
+    player: ServerPlayer,
+    val crate: Crate,
+    val preview: Preview,
+    userData: UserData
+): SimpleGui(
     preview.type.type, player, false
 ) {
     private val rewards: MutableMap<String, Pair<Reward, ItemStack>> = mutableMapOf()
@@ -21,8 +26,6 @@ class PreviewInventory(player: ServerPlayer, val crate: Crate, val preview: Prev
 
     init {
         this.title = crate.parsePlaceholders(preview.title).asNative(player)
-
-        val userData = SkiesCrates.INSTANCE.storage.getUser(player)
 
         preview.items.forEach { (id, item) ->
             item.createItemStack(player).let {

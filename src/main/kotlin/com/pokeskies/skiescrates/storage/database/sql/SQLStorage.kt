@@ -8,6 +8,7 @@ import com.pokeskies.skiescrates.data.userdata.UsedKeyData
 import com.pokeskies.skiescrates.data.userdata.UserData
 import com.pokeskies.skiescrates.storage.IStorage
 import com.pokeskies.skiescrates.storage.StorageType
+import com.pokeskies.skiescrates.storage.UserSaveResult
 import com.pokeskies.skiescrates.storage.database.sql.providers.MySQLProvider
 import com.pokeskies.skiescrates.storage.database.sql.providers.SQLiteProvider
 import java.lang.reflect.Type
@@ -56,7 +57,7 @@ class SQLStorage(private val config: SkiesCratesConfig.Storage) : IStorage {
         return userData
     }
 
-    override fun saveUser(userData: UserData): Boolean {
+    override fun saveUserResult(userData: UserData): UserSaveResult {
         return try {
             connectionProvider.createConnection().use {
                 val nextVersion = userData.version + 1
@@ -73,7 +74,9 @@ class SQLStorage(private val config: SkiesCratesConfig.Storage) : IStorage {
                 }
 
                 if (updated == 0) {
-                    if (userData.version != 0L || userExists(it, userData.uuid)) return false
+                    if (userData.version != 0L || userExists(it, userData.uuid)) {
+                        return UserSaveResult.CONFLICT
+                    }
 
                     try {
                         it.prepareStatement(
@@ -87,17 +90,17 @@ class SQLStorage(private val config: SkiesCratesConfig.Storage) : IStorage {
                             statement.executeUpdate()
                         }
                     } catch (e: SQLException) {
-                        if (userExists(it, userData.uuid)) return false
+                        if (userExists(it, userData.uuid)) return UserSaveResult.CONFLICT
                         throw e
                     }
                 }
 
                 userData.version = nextVersion
             }
-            true
+            UserSaveResult.SUCCESS
         } catch (e: Exception) {
             e.printStackTrace()
-            false
+            UserSaveResult.FAILURE
         }
     }
 
@@ -148,11 +151,34 @@ class SQLStorage(private val config: SkiesCratesConfig.Storage) : IStorage {
         }
     }
 
+    override fun claimUsedKey(usedKeyData: UsedKeyData): Boolean {
+        return try {
+            connectionProvider.createConnection().use {
+                it.prepareStatement(
+                    "INSERT INTO ${tables.usedKeys} (uuid, keyId, timeUsed, player) VALUES (?, ?, ?, ?)"
+                ).use { statement ->
+                    statement.setString(1, usedKeyData.uuid.toString())
+                    statement.setString(2, usedKeyData.keyId)
+                    statement.setLong(3, usedKeyData.timeUsed)
+                    statement.setString(4, usedKeyData.player.toString())
+                    statement.executeUpdate()
+                }
+            }
+            true
+        } catch (e: SQLException) {
+            if (getUsedKey(usedKeyData.uuid) == null) e.printStackTrace()
+            false
+        } catch (e: Exception) {
+            e.printStackTrace()
+            false
+        }
+    }
+
     override fun getUserAsync(uuid: UUID): CompletableFuture<UserData> {
         return CompletableFuture.supplyAsync({
             try {
                 getUser(uuid)
-            } catch (e: Exception) {
+            } catch (_: Exception) {
                 UserData(uuid)  // Return default data rather than throwing
             }
         }, SkiesCrates.INSTANCE.asyncExecutor)
@@ -173,6 +199,12 @@ class SQLStorage(private val config: SkiesCratesConfig.Storage) : IStorage {
     override fun saveUsedKeyAsync(usedKeyData: UsedKeyData): CompletableFuture<Boolean> {
         return CompletableFuture.supplyAsync({
             saveUsedKey(usedKeyData)
+        }, SkiesCrates.INSTANCE.asyncExecutor)
+    }
+
+    override fun claimUsedKeyAsync(usedKeyData: UsedKeyData): CompletableFuture<Boolean> {
+        return CompletableFuture.supplyAsync({
+            claimUsedKey(usedKeyData)
         }, SkiesCrates.INSTANCE.asyncExecutor)
     }
 

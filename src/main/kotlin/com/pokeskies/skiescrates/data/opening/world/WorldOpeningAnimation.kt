@@ -2,11 +2,13 @@ package com.pokeskies.skiescrates.data.opening.world
 
 import com.google.gson.*
 import com.pokeskies.skiescrates.data.opening.OpeningAnimation
+import com.pokeskies.skiescrates.data.rewards.Reward
 import java.lang.reflect.Type
 
 abstract class WorldOpeningAnimation(
     val type: WorldAnimationType
 ): OpeningAnimation {
+    abstract fun prepareRewards(opening: WorldOpeningInstance): List<Reward>
     abstract fun setup(opening: WorldOpeningInstance)
     abstract fun tick(opening: WorldOpeningInstance)
     abstract fun stop(opening: WorldOpeningInstance)

@@ -13,7 +13,6 @@ abstract class HikariCPProvider(private val storageConfig: SkiesCratesConfig.Sto
     @Throws(SQLException::class)
     override fun init() {
         val config = HikariConfig()
-        configure(config)
 
         config.username = storageConfig.username
         config.password = storageConfig.password
@@ -27,6 +26,7 @@ abstract class HikariCPProvider(private val storageConfig: SkiesCratesConfig.Sto
         config.connectionTimeout = storageConfig.poolSettings.connectionTimeout
         config.idleTimeout = storageConfig.poolSettings.idleTimeout
         config.maxLifetime = storageConfig.poolSettings.maxLifetime
+        configure(config)
 
         dataSource = HikariDataSource(config)
     }

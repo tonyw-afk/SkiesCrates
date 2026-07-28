@@ -1,6 +1,7 @@
 package com.pokeskies.skiescrates.storage.database
 
 import com.mongodb.ConnectionString
+import com.mongodb.ErrorCategory
 import com.mongodb.MongoClientSettings
 import com.mongodb.MongoCredential
 import com.mongodb.ServerAddress
@@ -18,6 +19,7 @@ import com.pokeskies.skiescrates.config.SkiesCratesConfig
 import com.pokeskies.skiescrates.data.userdata.UsedKeyData
 import com.pokeskies.skiescrates.data.userdata.UserData
 import com.pokeskies.skiescrates.storage.IStorage
+import com.pokeskies.skiescrates.storage.UserSaveResult
 import com.pokeskies.skiescrates.utils.Utils
 import org.bson.UuidRepresentation
 import org.bson.codecs.configuration.CodecRegistries
@@ -74,10 +76,10 @@ class MongoStorage(config: SkiesCratesConfig.Storage) : IStorage {
         return userdataCollection?.find(Filters.eq("_id", uuid))?.firstOrNull() ?: UserData(uuid)
     }
 
-    override fun saveUser(userData: UserData): Boolean {
+    override fun saveUserResult(userData: UserData): UserSaveResult {
         if (mongoDatabase == null) {
             Utils.printError("There was an error while attempting to save data to the Mongo database!")
-            return false
+            return UserSaveResult.FAILURE
         }
         val expectedVersion = userData.version
         val versionFilter = if (expectedVersion == 0L) {
@@ -92,21 +94,25 @@ class MongoStorage(config: SkiesCratesConfig.Storage) : IStorage {
                 Updates.set("keys", userData.keys),
                 Updates.set("version", expectedVersion + 1)
             )
-        ) ?: return false
+        ) ?: return UserSaveResult.FAILURE
 
         if (result.wasAcknowledged() && result.matchedCount == 1L) {
             userData.version = expectedVersion + 1
-            return true
+            return UserSaveResult.SUCCESS
         }
-        if (expectedVersion != 0L) return false
+        if (expectedVersion != 0L) return UserSaveResult.CONFLICT
 
         return try {
             val newUserData = UserData(userData).apply { version = 1L }
             userdataCollection?.insertOne(newUserData)
             userData.version = newUserData.version
-            true
+            UserSaveResult.SUCCESS
         } catch (e: MongoWriteException) {
-            if (e.error.code == 11000) false else throw e
+            if (ErrorCategory.fromErrorCode(e.error.code) == ErrorCategory.DUPLICATE_KEY) {
+                UserSaveResult.CONFLICT
+            } else {
+                throw e
+            }
         }
     }
 
@@ -127,6 +133,19 @@ class MongoStorage(config: SkiesCratesConfig.Storage) : IStorage {
         val result = this.usedKeysCollection?.replaceOne(query, usedKeyData, ReplaceOptions().upsert(true))
 
         return result?.wasAcknowledged() ?: false
+    }
+
+    override fun claimUsedKey(usedKeyData: UsedKeyData): Boolean {
+        if (mongoDatabase == null) {
+            Utils.printError("There was an error while attempting to save data to the Mongo database!")
+            return false
+        }
+
+        return try {
+            usedKeysCollection?.insertOne(usedKeyData)?.wasAcknowledged() ?: false
+        } catch (e: MongoWriteException) {
+            if (ErrorCategory.fromErrorCode(e.error.code) == ErrorCategory.DUPLICATE_KEY) false else throw e
+        }
     }
 
     override fun getUserAsync(uuid: UUID): CompletableFuture<UserData> {
@@ -150,6 +169,12 @@ class MongoStorage(config: SkiesCratesConfig.Storage) : IStorage {
     override fun saveUsedKeyAsync(usedKeyData: UsedKeyData): CompletableFuture<Boolean> {
         return CompletableFuture.supplyAsync({
             saveUsedKey(usedKeyData)
+        }, SkiesCrates.INSTANCE.asyncExecutor)
+    }
+
+    override fun claimUsedKeyAsync(usedKeyData: UsedKeyData): CompletableFuture<Boolean> {
+        return CompletableFuture.supplyAsync({
+            claimUsedKey(usedKeyData)
         }, SkiesCrates.INSTANCE.asyncExecutor)
     }
 

@@ -1,6 +1,5 @@
 package com.pokeskies.skiescrates.gui
 
-import com.pokeskies.skiescrates.SkiesCrates
 import com.pokeskies.skiescrates.data.Crate
 import com.pokeskies.skiescrates.data.opening.inventory.InventoryOpeningAnimation
 import com.pokeskies.skiescrates.data.opening.inventory.InventoryOpeningInstance
@@ -31,7 +30,7 @@ class CrateInventory(
     private var cachedRewardStacks: MutableMap<String, ItemStack> = mutableMapOf()
     private var rewardSpinners: MutableMap<String, RewardSpinnerInstance> = mutableMapOf()
 
-    private val userData = SkiesCrates.INSTANCE.storage.getUser(player)
+    private val userData = opening.userData
 
     private val crate: Crate = opening.crate
     private val animation: InventoryOpeningAnimation = opening.animation
@@ -106,10 +105,7 @@ class CrateInventory(
             }
 
             if (allCompleted) {
-                isFinished = true
-                val rewards = giveRewards()
-                SkiesCrates.INSTANCE.storage.saveUser(userData)
-                CrateOpenedEvent.EVENT.invoker().onCrateOpened(player, crate, opening.openData, rewards)
+                completeOpening()
             }
         }
 
@@ -126,10 +122,7 @@ class CrateInventory(
     override fun onClose() {
         if (!isFinished) {
             if (animation.skippable) {
-                isFinished = true
-                val rewards = giveRewards()
-                SkiesCrates.INSTANCE.storage.saveUser(userData)
-                CrateOpenedEvent.EVENT.invoker().onCrateOpened(player, crate, opening.openData, rewards)
+                completeOpening()
             } else {
                 this.open()
                 return
@@ -139,9 +132,15 @@ class CrateInventory(
         opening.stop()
     }
 
-    private fun giveRewards(): List<Reward> {
-        return rewardSpinners.flatMap { (_, data) ->
-            data.giveRewards(player, crate)
-        }
+    private fun completeOpening() {
+        if (isFinished) return
+        isFinished = true
+        val rewards = getFinalRewards()
+        rewards.forEach { it.giveReward(player, crate) }
+        CrateOpenedEvent.EVENT.invoker().onCrateOpened(player, crate, opening.openData, rewards)
+    }
+
+    fun getFinalRewards(): List<Reward> {
+        return rewardSpinners.flatMap { (_, data) -> data.getFinalRewards() }
     }
 }

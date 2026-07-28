@@ -5,6 +5,7 @@ import com.pokeskies.skiescrates.config.ConfigManager
 import com.pokeskies.skiescrates.data.userdata.UsedKeyData
 import com.pokeskies.skiescrates.data.userdata.UserData
 import com.pokeskies.skiescrates.storage.IStorage
+import com.pokeskies.skiescrates.storage.UserSaveResult
 import java.util.*
 import java.util.concurrent.CompletableFuture
 
@@ -22,15 +23,15 @@ class FileStorage : IStorage {
     }
 
     @Synchronized
-    override fun saveUser(userData: UserData): Boolean {
+    override fun saveUserResult(userData: UserData): UserSaveResult {
         val storedUserData = fileData.userdata[userData.uuid]
-        if ((storedUserData?.version ?: 0L) != userData.version) return false
+        if ((storedUserData?.version ?: 0L) != userData.version) return UserSaveResult.CONFLICT
 
         val updatedUserData = UserData(userData).apply { version++ }
         fileData.userdata[userData.uuid] = updatedUserData
         if (saveFileData()) {
             userData.version = updatedUserData.version
-            return true
+            return UserSaveResult.SUCCESS
         }
 
         if (storedUserData == null) {
@@ -38,7 +39,7 @@ class FileStorage : IStorage {
         } else {
             fileData.userdata[userData.uuid] = storedUserData
         }
-        return false
+        return UserSaveResult.FAILURE
     }
 
     @Synchronized
@@ -56,6 +57,17 @@ class FileStorage : IStorage {
         } else {
             fileData.usedKeys[usedKeyData.uuid] = storedUsedKey
         }
+        return false
+    }
+
+    @Synchronized
+    override fun claimUsedKey(usedKeyData: UsedKeyData): Boolean {
+        if (fileData.usedKeys.containsKey(usedKeyData.uuid)) return false
+
+        fileData.usedKeys[usedKeyData.uuid] = UsedKeyData(usedKeyData)
+        if (saveFileData()) return true
+
+        fileData.usedKeys.remove(usedKeyData.uuid)
         return false
     }
 
@@ -88,6 +100,12 @@ class FileStorage : IStorage {
     override fun saveUsedKeyAsync(usedKeyData: UsedKeyData): CompletableFuture<Boolean> {
         return CompletableFuture.supplyAsync({
             saveUsedKey(usedKeyData)
+        }, SkiesCrates.INSTANCE.asyncExecutor)
+    }
+
+    override fun claimUsedKeyAsync(usedKeyData: UsedKeyData): CompletableFuture<Boolean> {
+        return CompletableFuture.supplyAsync({
+            claimUsedKey(usedKeyData)
         }, SkiesCrates.INSTANCE.asyncExecutor)
     }
 }

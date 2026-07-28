@@ -24,6 +24,10 @@ class WorldOpeningInstance(
         animation.setup(this)
     }
 
+    fun prepareRewards(): List<Reward> {
+        return animation.prepareRewards(this)
+    }
+
     override fun stop() {
         super.stop()
         animation.stop(this)
