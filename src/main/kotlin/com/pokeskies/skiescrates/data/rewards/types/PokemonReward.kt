@@ -5,6 +5,7 @@ import com.cobblemon.mod.common.api.pokemon.PokemonProperties
 import com.cobblemon.mod.common.api.pokemon.PokemonSpecies
 import com.cobblemon.mod.common.item.PokemonItem
 import com.cobblemon.mod.common.pokemon.Pokemon
+import com.cobblemon.mod.common.pokemon.Species
 import com.google.gson.annotations.JsonAdapter
 import com.google.gson.annotations.SerializedName
 import com.pokeskies.skiescrates.config.item.GenericItem
@@ -47,7 +48,7 @@ class PokemonReward(
         // Super to call the message
         super.giveReward(player, crate)
 
-        val pokemonInstance = pokemon.createPokemon(false) ?: run {
+        val pokemonInstance = pokemon.createPokemon() ?: run {
             Utils.printError("Failed to create Pokemon for reward '$name' when giving to player ${player.name}.")
             player.sendMessage(net.kyori.adventure.text.Component.text("Your Pokemon Reward could not be created! Please contact an administrator.",
                 NamedTextColor.RED))
@@ -74,9 +75,8 @@ class PokemonReward(
             }.createItemStack(player, placeholders)
         }
 
-        val pokemonInstance = pokemon.createPokemon(true)
-        val itemStack = if (pokemonInstance != null && !pokemon.isRandom()) {
-            PokemonItem.from(pokemonInstance)
+        val itemStack = if (!pokemon.isRandom()) {
+            pokemon.createDisplayItem() ?: DEFAULT_DISPLAY.createItemStack(player, placeholders)
         } else {
             DEFAULT_DISPLAY.createItemStack(player, placeholders)
         }
@@ -133,13 +133,49 @@ class PokemonReward(
             return species.equals("random", ignoreCase = true)
         }
 
-        // Create a Pokemon instance based on the options. isDisplay may affect how it's created to not promise the player something they may not get.
-        fun createPokemon(isDisplay: Boolean): Pokemon? {
+        fun createDisplayItem(): ItemStack? {
+            val species = createSpecies() ?: return null
+            val properties = PokemonProperties.parse(buildList {
+                add(species.resourceIdentifier.toString())
+                if (form.isNotEmpty()) add("form=$form")
+                addAll(aspects)
+            }.joinToString(" "))
+
+            if (shiny is BooleanValue) properties.shiny = shiny.bool
+            properties.updateAspects()
+
+            return PokemonItem.from(species, properties.aspects)
+        }
+
+        fun createPokemon(): Pokemon? {
+            val species = createSpecies() ?: return null
+            val pokemon = species.create()
+            pokemon.form = species.getFormByName(form)
+
+            aspects.forEach {
+                PokemonProperties.parse(it).apply(pokemon)
+            }
+
+            level?.let { option -> pokemon.level = option.getValue() }
+            shiny?.let { option ->
+                if (option is BooleanValue) {
+                    pokemon.shiny = option.bool
+                } else if (option is BooleanChance) {
+                    pokemon.shiny = option.getValue()
+                }
+            }
+
+            pokemon.initialize()
+
+            return pokemon
+        }
+
+        private fun createSpecies(): Species? {
             if (species.isEmpty()) {
                 Utils.printError("Species was empty when creating Pokemon reward.")
                 return null
             }
-            val species = if (isRandom()) {
+            return if (isRandom()) {
                 PokemonSpecies.random()
             } else {
                 if (species.contains(":")) {
@@ -153,26 +189,6 @@ class PokemonReward(
                 Utils.printError("Could not find Pokemon species '$species' when creating Pokemon reward.")
                 return null
             }
-
-            val pokemon = species.create()
-            pokemon.form = species.getFormByName(form)
-
-            aspects.forEach {
-                PokemonProperties.parse(it).apply(pokemon)
-            }
-
-            level?.let { option -> pokemon.level = option.getValue() }
-            shiny?.let { option ->
-                if (option is BooleanValue) {
-                    pokemon.shiny = option.bool
-                } else if (option is BooleanChance && !isDisplay) {
-                    pokemon.shiny = option.getValue()
-                }
-            }
-
-            pokemon.initialize()
-
-            return pokemon
         }
     }
 
