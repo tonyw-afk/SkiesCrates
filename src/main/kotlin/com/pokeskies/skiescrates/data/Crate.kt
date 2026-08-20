@@ -2,11 +2,11 @@ package com.pokeskies.skiescrates.data
 
 import com.google.gson.annotations.JsonAdapter
 import com.google.gson.annotations.SerializedName
-import com.pokeskies.skiescrates.config.ConfigManager
 import com.pokeskies.skiescrates.config.CostOptions
 import com.pokeskies.skiescrates.config.FailureOptions
 import com.pokeskies.skiescrates.config.block.BlockOptions
 import com.pokeskies.skiescrates.config.item.GenericItem
+import com.pokeskies.skiescrates.data.key.KeyRequirements
 import com.pokeskies.skiescrates.data.rewards.Reward
 import com.pokeskies.skiescrates.data.userdata.UserData
 import com.pokeskies.skiescrates.utils.RandomCollection
@@ -24,7 +24,7 @@ class Crate(
     val cost: CostOptions? = null,
     val cooldown: Long = -1,
     val failure: FailureOptions? = null,
-    val keys: Map<String, Int> = emptyMap(),
+    val keys: KeyRequirements = KeyRequirements(),
     @SerializedName("hold_key")
     val holdKey: Boolean = false,
     val block: BlockOptions = BlockOptions(),
@@ -38,9 +38,7 @@ class Crate(
     fun parsePlaceholders(string: String): String {
         return string.replace("%crate_name%", name)
             .replace("%crate_id%", id)
-            .replace("%crate_keys%", keys.entries.joinToString(", ") { (keyId, amount) ->
-                "${ConfigManager.KEYS[keyId]?.name ?: keyId} x$amount"
-            })
+            .replace("%crate_keys%", keys.getDisplay())
             .replace("%crate_inventory_space%", inventorySpace.toString())
     }
 

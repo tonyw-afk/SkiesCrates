@@ -424,24 +424,55 @@ object CratesManager {
         // Check for any keys needed
         if (!isForced && crate.keys.isNotEmpty()) {
             if (!withContext(MinecraftDispatcher(player.server)) {
-                    val results = crate.keys.entries.associate { (keyId, amount) ->
-                        val key = ConfigManager.KEYS[keyId]
-                        val result = key?.let {
-                            KeyManager.checkPlayerForKeys(player, playerData, it, amount, crate.holdKey)
-                        } ?: KeyCheckResult.NOT_FOUND
-                        keyId to CrateKeyCheckEvent.EVENT.invoker().onCrateKeyCheck(
-                            player,
-                            crate,
-                            openData,
-                            keyId,
-                            key,
-                            amount,
-                            crate.holdKey,
-                            result
-                        )
+                // builds a list of key ids held by the player (main and off hand) for the hold_key setting
+                    val heldKeyIds = if (crate.holdKey) {
+                        buildSet {
+                            val mainHand = player.inventory.items[player.inventory.selected]
+                            if (!mainHand.isEmpty) {
+                                KeyManager.getKeyOrNull(mainHand)?.id?.let { add(it) }
+                            }
+
+                            val offhand = player.offhandItem
+                            if (!offhand.isEmpty) {
+                                KeyManager.getKeyOrNull(offhand)?.id?.let { add(it) }
+                            }
+                        }
+                    } else {
+                        emptySet()
+                    }
+
+                    val failedResults = mutableListOf<Map.Entry<String, KeyCheckResult>>()
+                    for (group in crate.keys.groups) {
+                        val requiresHeldKey = crate.holdKey && group.keys.any { it in heldKeyIds }
+                        val results = group.entries.associate { (keyId, amount) ->
+                            val key = ConfigManager.KEYS[keyId]
+                            val baseResult = key?.let {
+                                KeyManager.checkPlayerForKeys(player, playerData, it, amount, false)
+                            } ?: KeyCheckResult.NOT_FOUND
+                            val result = when {
+                                baseResult == KeyCheckResult.NOT_FOUND || baseResult == KeyCheckResult.INVALID -> baseResult
+                                crate.holdKey && !requiresHeldKey -> KeyCheckResult.NOT_HOLDING
+                                else -> baseResult
+                            }
+                            keyId to CrateKeyCheckEvent.EVENT.invoker().onCrateKeyCheck(
+                                player,
+                                crate,
+                                openData,
+                                keyId,
+                                key,
+                                amount,
+                                crate.holdKey,
+                                result
+                            )
+                        }
+                        if (results.values.all { it == KeyCheckResult.SUCCESS }) {
+                            openData.selectedKeys = group
+                            return@withContext true
+                        }
+                        failedResults.addAll(results.entries)
                     }
                     // Sort out the highest error return from the key checks to display to the user
-                    val highest = results.maxBy { (_, result) -> result.priority }
+                    val highest = failedResults.maxBy { (_, result) -> result.priority }
                     when (highest.value) {
                         KeyCheckResult.INVALID -> {
                             handleCrateFail(player, crate, openData)
@@ -482,7 +513,7 @@ object CratesManager {
                         }
                         KeyCheckResult.SUCCESS -> {}
                     }
-                    true
+                    false
             }) return false
         }
 
@@ -641,7 +672,7 @@ object CratesManager {
                         currentData.addCrateCooldown(crate, cooldownAppliedAt ?: System.currentTimeMillis())
                     }
 
-                    for ((keyId, amount) in crate.keys) {
+                    for ((keyId, amount) in openData.selectedKeys) {
                         val key = ConfigManager.KEYS[keyId] ?: continue
                         if (key.virtual && !currentData.removeKeys(key, amount)) {
                             keysChanged = true
@@ -678,7 +709,7 @@ object CratesManager {
                 return@withContext false
             }
             if (!isForced) {
-                for ((keyId, amount) in crate.keys) {
+                for ((keyId, amount) in openData.selectedKeys) {
                     val key = ConfigManager.KEYS[keyId] ?: continue
                     if (key.virtual) {
                         CrateKeyConsumeEvent.EVENT.invoker().onCrateKeyConsume(player, crate, openData, key, amount)
@@ -715,7 +746,7 @@ object CratesManager {
     }
 
     private suspend fun consumePhysicalKeys(player: ServerPlayer, crate: Crate, openData: CrateOpenData): Boolean {
-        for ((keyId, amount) in crate.keys) {
+        for ((keyId, amount) in openData.selectedKeys) {
             val key = ConfigManager.KEYS[keyId] ?: continue
             if (key.virtual) continue
 
