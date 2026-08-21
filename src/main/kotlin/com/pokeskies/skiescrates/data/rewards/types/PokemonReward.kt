@@ -6,6 +6,8 @@ import com.cobblemon.mod.common.api.pokemon.PokemonSpecies
 import com.cobblemon.mod.common.item.PokemonItem
 import com.cobblemon.mod.common.pokemon.Pokemon
 import com.cobblemon.mod.common.pokemon.Species
+import com.cobblemon.mod.common.pokemon.properties.AspectPropertyType
+import com.cobblemon.mod.common.pokemon.properties.StringProperty
 import com.google.gson.annotations.JsonAdapter
 import com.google.gson.annotations.SerializedName
 import com.pokeskies.skiescrates.config.item.GenericItem
@@ -144,7 +146,12 @@ class PokemonReward(
             if (shiny is BooleanValue) properties.shiny = shiny.bool
             properties.updateAspects()
 
-            return PokemonItem.from(species, properties.aspects)
+            val forcedAspects = properties.customProperties
+                .filterIsInstance<StringProperty>()
+                .filter { it.key in AspectPropertyType.keys }
+                .map { it.value }
+
+            return PokemonItem.from(species, properties.aspects + forcedAspects)
         }
 
         fun createPokemon(): Pokemon? {
