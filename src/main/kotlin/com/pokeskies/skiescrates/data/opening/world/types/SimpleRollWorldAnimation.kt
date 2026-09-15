@@ -204,7 +204,7 @@ class SimpleRollWorldAnimation(
         }
 
         // Play sound
-        PlayerLookup.tracking(opening.instance.level, opening.instance.pos).forEach { serverPlayer ->
+        PlayerLookup.around(opening.instance.level, opening.instance.pos, 12.0).forEach { serverPlayer ->
             sound?.playSound(serverPlayer)
         }
     }

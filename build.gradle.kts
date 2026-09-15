@@ -127,7 +127,7 @@ dependencies {
     implementation(include("com.mysql:mysql-connector-j:8.2.0")!!)
 
     // Integrations
-    modImplementation("com.cobblemon:fabric:1.7.3+1.21.1-SNAPSHOT")
+    modImplementation("com.cobblemon:fabric:1.8.1+1.21.1")
     modCompileOnly("io.github.flemmli97:flan:1.21.1-1.12.2-fabric:api") {
         isTransitive = false
     }
