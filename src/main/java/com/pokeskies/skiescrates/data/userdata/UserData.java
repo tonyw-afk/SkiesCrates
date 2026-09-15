@@ -7,6 +7,7 @@ import org.bson.codecs.pojo.annotations.BsonProperty;
 import org.jetbrains.annotations.Nullable;
 
 import java.util.HashMap;
+import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 
@@ -14,23 +15,50 @@ public class UserData {
     @BsonProperty("_id")
     public UUID uuid;
     @BsonProperty
+    public long version;
+    @BsonProperty
     public HashMap<String, CrateData> crates;
     @BsonProperty
     public HashMap<String, Integer> keys;
 
     public UserData(UUID uuid) {
         this.uuid = uuid;
+        this.version = 0L;
         this.crates = new HashMap<>();
         this.keys = new HashMap<>();
     }
 
     public UserData(UUID uuid, HashMap<String, CrateData> crates, HashMap<String, Integer> keys) {
         this.uuid = uuid;
+        this.version = 0L;
         this.crates = crates;
         this.keys = keys;
     }
 
+    public UserData(UserData userData) {
+        this.uuid = userData.uuid;
+        this.version = userData.version;
+        this.crates = cloneCrateData(userData.crates);
+        this.keys = userData.keys == null ? new HashMap<>() : new HashMap<>(userData.keys);
+    }
+
     public UserData() {}
+
+    private static HashMap<String, CrateData> cloneCrateData(Map<String, CrateData> crates) {
+        HashMap<String, CrateData> copy = new HashMap<>();
+        if (crates == null) return copy;
+
+        crates.forEach((crateId, crateData) -> {
+            HashMap<String, RewardLimitData> rewards = new HashMap<>();
+            if (crateData.rewards != null) {
+                crateData.rewards.forEach((rewardId, rewardData) ->
+                    rewards.put(rewardId, new RewardLimitData(rewardData.claimed, rewardData.time))
+                );
+            }
+            copy.put(crateId, new CrateData(crateData.lastOpen, crateData.openCount, rewards));
+        });
+        return copy;
+    }
 
     public @Nullable Long getCrateCooldown(Crate crate) {
         return Optional.ofNullable(crates.get(crate.id)).map(data -> data.lastOpen).orElse(null);
@@ -77,6 +105,7 @@ public class UserData {
     public String toString() {
         return "UserData{" +
                 "uuid=" + uuid +
+                ", version=" + version +
                 ", crates=" + crates +
                 ", keys=" + keys +
                 '}';

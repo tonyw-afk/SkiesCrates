@@ -87,31 +87,30 @@ object KeyManager {
         if (key.virtual) {
             val storage = SkiesCrates.INSTANCE.storage
 
-            return storage.getUserAsync(player.uuid)
-                .thenCompose { playerData ->
-                    playerData.addKeys(key, amount)
-                    storage.saveUserAsync(playerData)
-                }
-                .thenApplyAsync { result ->
-                    if (result && !silent) {
-                        player.server.execute {
-                            Lang.KEY_GIVE.forEach {
-                                player.sendMessage(
-                                    it.replace("%key_name%", key.name)
-                                        .replace("%amount%", amount.toString())
-                                        .asNative(player)
-                                )
-                            }
+            return storage.updateUserAsync(player.uuid) { playerData ->
+                playerData.addKeys(key, amount)
+                true
+            }.thenApplyAsync { playerData ->
+                val result = playerData != null
+                if (result && !silent) {
+                    player.server.execute {
+                        Lang.KEY_GIVE.forEach {
+                            player.sendMessage(
+                                it.replace("%key_name%", key.name)
+                                    .replace("%amount%", amount.toString())
+                                    .asNative(player)
+                            )
                         }
                     }
-                    result
-                }.exceptionally { e ->
-                    Utils.printError("Storage was null while attempting save ${player.name.string}'s userdata while giving them keys! Check elsewhere for errors. Local Error: ${e.message}")
-                    Lang.ERROR_STORAGE.forEach {
-                        player.sendMessage(it.asNative())
-                    }
-                    false
                 }
+                result
+            }.exceptionally { e ->
+                Utils.printError("Storage was null while attempting save ${player.name.string}'s userdata while giving them keys! Check elsewhere for errors. Local Error: ${e.message}")
+                Lang.ERROR_STORAGE.forEach {
+                    player.sendMessage(it.asNative())
+                }
+                false
+            }
         }
 
         val item = key.display.createItemStack(player)
@@ -159,15 +158,11 @@ object KeyManager {
         if (key.virtual) {
             val storage = SkiesCrates.INSTANCE.storage
 
-            return storage.getUserAsync(player.uuid)
-                .thenCompose { playerData ->
-                    if (!playerData.removeKeys(key, amount)) {
-                        CompletableFuture.completedFuture(false)
-                    } else {
-                        storage.saveUserAsync(playerData)
-                    }
-                }
-                .thenApplyAsync { result ->
+            return storage.updateUserAsync(player.uuid) { playerData ->
+                playerData.removeKeys(key, amount)
+            }
+                .thenApplyAsync { playerData ->
+                    val result = playerData != null
                     if (result && !silent) {
                         player.server.execute {
                             Lang.KEY_TAKE.forEach {
@@ -197,31 +192,30 @@ object KeyManager {
         if (key.virtual) {
             val storage = SkiesCrates.INSTANCE.storage
 
-            return storage.getUserAsync(player.uuid)
-                .thenCompose { playerData ->
-                    playerData.setKeys(key, amount)
-                    storage.saveUserAsync(playerData)
-                }
-                .thenApplyAsync { result ->
-                    if (result && !silent) {
-                        player.server.execute {
-                            Lang.KEY_SET.forEach {
-                                player.sendMessage(
-                                    it.replace("%key_name%", key.name)
-                                        .replace("%amount%", amount.toString())
-                                        .asNative(player)
-                                )
-                            }
+            return storage.updateUserAsync(player.uuid) { playerData ->
+                playerData.setKeys(key, amount)
+                true
+            }.thenApplyAsync { playerData ->
+                val result = playerData != null
+                if (result && !silent) {
+                    player.server.execute {
+                        Lang.KEY_SET.forEach {
+                            player.sendMessage(
+                                it.replace("%key_name%", key.name)
+                                    .replace("%amount%", amount.toString())
+                                    .asNative(player)
+                            )
                         }
                     }
-                    result
-                }.exceptionally { _ ->
-                    Utils.printError("Storage was null while attempting save ${player.name.string}'s userdata while setting their keys! Check elsewhere for errors.")
-                    Lang.ERROR_STORAGE.forEach {
-                        player.sendMessage(it.asNative())
-                    }
-                    false
                 }
+                result
+            }.exceptionally { _ ->
+                Utils.printError("Storage was null while attempting save ${player.name.string}'s userdata while setting their keys! Check elsewhere for errors.")
+                Lang.ERROR_STORAGE.forEach {
+                    player.sendMessage(it.asNative())
+                }
+                false
+            }
         }
 
         return CompletableFuture.completedFuture(false)
@@ -268,9 +262,11 @@ object KeyManager {
         return confirmedUsedCache.getIfPresent(uuid) != null
     }
 
-    fun markUniqueUUIDUsed(data: UsedKeyData) {
-        confirmedUsedCache.put(data.uuid, data)
-        SkiesCrates.INSTANCE.storage.saveUsedKey(data)
+    fun markUniqueUUIDUsedAsync(data: UsedKeyData): CompletableFuture<Boolean> {
+        return SkiesCrates.INSTANCE.storage.claimUsedKeyAsync(data).thenApply { claimed ->
+            if (claimed) confirmedUsedCache.put(data.uuid, data)
+            claimed
+        }
     }
 
     fun isUniqueUUIDUsedAsync(uuid: UUID): CompletableFuture<Boolean> {
@@ -356,7 +352,7 @@ object KeyManager {
                 return false
             }
 
-            if (isUniqueUUIDUsed(uuid)) {
+            if (isUniqueUUIDCached(uuid)) {
                 alertDuplicateKey(player, key, KeyDuplicateAlert.ALREADY_USED, mapOf("%key_uuid%" to uniqueId))
                 itemStack.count = 0
                 return false
@@ -366,25 +362,29 @@ object KeyManager {
         return true
     }
 
-    fun markStackUsed(itemStack: ItemStack, key: Key, keyId: String, player: ServerPlayer) {
-        if (key.unique) {
-            itemStack.get(DataComponents.CUSTOM_DATA)?.let { data ->
-                val uuidString = data.copyTag()?.getString(KEY_UNIQUE_IDENTIFIER)
-                val uuid = try {
-                    UUID.fromString(uuidString)
-                } catch (_: Exception) {
-                    null
-                }
-                if (uuid != null) {
-                    markUniqueUUIDUsed(UsedKeyData(
-                        uuid,
-                        keyId,
-                        System.currentTimeMillis(),
-                        player.uuid
-                    ))
-                }
-            }
+    fun markStackUsedAsync(
+        itemStack: ItemStack,
+        key: Key,
+        keyId: String,
+        player: ServerPlayer
+    ): CompletableFuture<Boolean> {
+        if (!key.unique) return CompletableFuture.completedFuture(true)
+
+        val data = itemStack.get(DataComponents.CUSTOM_DATA)
+            ?: return CompletableFuture.completedFuture(false)
+        val uuidString = data.copyTag().getString(KEY_UNIQUE_IDENTIFIER)
+        val uuid = try {
+            UUID.fromString(uuidString)
+        } catch (_: Exception) {
+            return CompletableFuture.completedFuture(false)
         }
+
+        return markUniqueUUIDUsedAsync(UsedKeyData(
+            uuid,
+            keyId,
+            System.currentTimeMillis(),
+            player.uuid
+        ))
     }
 
     private fun alertDuplicateKey(player: ServerPlayer, key: Key, alert: KeyDuplicateAlert, placeholders: Map<String, String> = emptyMap()) {

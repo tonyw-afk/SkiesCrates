@@ -7,7 +7,6 @@ import com.pokeskies.skiescrates.data.rewards.Reward
 import com.pokeskies.skiescrates.data.userdata.UserData
 import com.pokeskies.skiescrates.gui.CrateInventory
 import com.pokeskies.skiescrates.utils.RandomCollection
-import net.minecraft.server.level.ServerPlayer
 
 class RewardSpinnerInstance(
     spinningItem: SpinningItem,
@@ -64,24 +63,17 @@ class RewardSpinnerInstance(
         }
     }
 
-    fun giveRewards(player: ServerPlayer, crate: Crate): List<Reward> {
-        val finalRewards = getFinalRewards()
-        finalRewards.forEach { reward ->
-            reward.giveReward(player, crate)
-        }
-        return finalRewards
-    }
-
     // Check if any rewards cause limit exceptions, remove and regenerate them if so
     // Return null if the list couldn't be regenerated (i.e. all rewards hit their limits)
     // Return the modified bag if successful
     fun validateRewards(crate: Crate, userData: UserData): RandomCollection<Reward>? {
+        val copyData = UserData(userData)
         val rewards = getFinalRewards()
         for ((i, reward) in rewards.withIndex()) {
             val limit = reward.getPlayerLimit()
             if (limit > 0) {
                 // If the player can't receive this reward, remove it from the bag and regenerate the slot
-                if (!reward.canReceive(userData, crate)) {
+                if (!reward.canReceive(copyData, crate)) {
                     randomBag.remove(reward)
                     if (randomBag.size() <= 0) {
                         return null
@@ -97,8 +89,8 @@ class RewardSpinnerInstance(
                     pregeneratedSlots[index] = newReward
                 } else {
                     // If the user can receive it, increment their uses and check if we have hit the limit
-                    val uses = userData.getRewardLimits(crate, reward)
-                    userData.addRewardUse(crate, reward)
+                    val uses = copyData.getRewardLimits(crate, reward)
+                    copyData.addRewardUse(crate, reward)
                     if ((uses + 1) > limit) {
                         randomBag.remove(reward)
                         if (randomBag.size() <= 0) {

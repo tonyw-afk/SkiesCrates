@@ -21,6 +21,10 @@ public class UsedKeyData {
         this.player = player;
     }
 
+    public UsedKeyData(UsedKeyData usedKeyData) {
+        this(usedKeyData.uuid, usedKeyData.keyId, usedKeyData.timeUsed, usedKeyData.player);
+    }
+
     public UsedKeyData() {}
 
     @Override

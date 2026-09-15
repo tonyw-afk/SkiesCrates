@@ -11,7 +11,10 @@ class CrateOpenData(
     val itemStack: ItemStack?, // This is the item that was used to open the crate. This is used for inventory based crates NOT for keys
     val interaction: CrateInteractionEvent.InteractionType
 ) {
+    // this is a cached list of keys and their amounts for quick-access
+    var selectedKeys: Map<String, Int> = emptyMap()
+
     override fun toString(): String {
-        return "CrateOpenData(location=$location, itemStack=$itemStack, interaction=$interaction)"
+        return "CrateOpenData(location=$location, itemStack=$itemStack, interaction=$interaction, selectedKeys=$selectedKeys)"
     }
 }

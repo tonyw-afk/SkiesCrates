@@ -49,6 +49,7 @@ class SimpleRollWorldAnimation(
 
     @Transient private var isStarted = false
     @Transient private var isCompleted = false
+    @Transient private var isPrepared = false
     @Transient private var ticks = startDelay
 
     @Transient private var spinsRemaining = spinCount
@@ -72,6 +73,16 @@ class SimpleRollWorldAnimation(
     }
 
     override fun setup(opening: WorldOpeningInstance) {
+        prepareRewards(opening)
+
+        if (hideHologram && ModIntegration.HOLODISPLAYS.isModLoaded()) {
+            HologramsManager.hideHologramForPlayer(opening.player, opening.instance)
+        }
+    }
+
+    override fun prepareRewards(opening: WorldOpeningInstance): List<Reward> {
+        if (isPrepared) return pregeneratedSlots.lastOrNull()?.let(::listOf) ?: emptyList()
+
         pregeneratedSlots = List(spinCount) { generateItem(opening) }.filterNotNull().toMutableList()
 
         currentIndex = 0
@@ -87,12 +98,9 @@ class SimpleRollWorldAnimation(
         ticksUntilChange = changeInterval
 
         pos = opening.instance.pos.bottomCenter.add(offset.toVec3())
+        isPrepared = true
 
-        if (hideHologram && ModIntegration.HOLODISPLAYS.isModLoaded()) {
-            PlayerLookup.tracking(opening.instance.level, opening.instance.pos).forEach { serverPlayer ->
-                HologramsManager.hideHologramForPlayer(serverPlayer, opening.instance)
-            }
-        }
+        return pregeneratedSlots.lastOrNull()?.let(::listOf) ?: emptyList()
     }
 
     // Ticks the current spinner and returns if the spinner is completed

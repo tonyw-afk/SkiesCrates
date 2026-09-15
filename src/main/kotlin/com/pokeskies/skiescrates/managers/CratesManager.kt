@@ -10,13 +10,24 @@ import com.pokeskies.skiescrates.data.CrateInstance
 import com.pokeskies.skiescrates.data.CrateOpenData
 import com.pokeskies.skiescrates.data.DimensionalBlockPos
 import com.pokeskies.skiescrates.data.key.KeyCheckResult
+import com.pokeskies.skiescrates.data.opening.OpeningInstance
 import com.pokeskies.skiescrates.data.opening.inventory.InventoryOpeningAnimation
 import com.pokeskies.skiescrates.data.opening.inventory.InventoryOpeningInstance
 import com.pokeskies.skiescrates.data.opening.world.WorldOpeningAnimation
 import com.pokeskies.skiescrates.data.opening.world.WorldOpeningInstance
+import com.pokeskies.skiescrates.data.rewards.Reward
 import com.pokeskies.skiescrates.economy.EconomyManager
+import com.pokeskies.skiescrates.events.CrateCooldownApplyEvent
+import com.pokeskies.skiescrates.events.CrateCooldownCheckEvent
+import com.pokeskies.skiescrates.events.CrateCostChargeEvent
 import com.pokeskies.skiescrates.events.CrateInteractionEvent
+import com.pokeskies.skiescrates.events.CrateKeyCheckEvent
+import com.pokeskies.skiescrates.events.CrateKeyConsumeEvent
+import com.pokeskies.skiescrates.events.CrateOpenAttemptEvent
+import com.pokeskies.skiescrates.events.CrateOpenEvent
+import com.pokeskies.skiescrates.events.CrateOpenFailedEvent
 import com.pokeskies.skiescrates.events.CrateOpenedEvent
+import com.pokeskies.skiescrates.events.CratePreviewEvent
 import com.pokeskies.skiescrates.events.ItemSwingEvent
 import com.pokeskies.skiescrates.gui.PreviewInventory
 import com.pokeskies.skiescrates.integrations.bil.BILCrateData
@@ -26,18 +37,17 @@ import com.pokeskies.skiescrates.utils.Utils
 import com.pokeskies.skiescrates.utils.asNative
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.future.await
 import me.lucko.fabric.api.permissions.v0.Permissions
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerChunkEvents
 import net.fabricmc.fabric.api.event.player.AttackBlockCallback
 import net.fabricmc.fabric.api.event.player.PlayerBlockBreakEvents
 import net.fabricmc.fabric.api.event.player.UseBlockCallback
 import net.fabricmc.fabric.api.event.player.UseItemCallback
-import net.fabricmc.fabric.api.networking.v1.PlayerLookup
 import net.fabricmc.fabric.api.networking.v1.ServerPlayConnectionEvents
 import net.minecraft.core.component.DataComponentPatch
 import net.minecraft.core.component.DataComponents
 import net.minecraft.nbt.CompoundTag
-import net.minecraft.network.chat.Component
 import net.minecraft.server.level.ServerLevel
 import net.minecraft.server.level.ServerPlayer
 import net.minecraft.world.InteractionHand
@@ -283,8 +293,8 @@ object CratesManager {
         tag.putString(CRATE_IDENTIFIER, crate.id)
         item.applyComponents(
             DataComponentPatch.builder()
-                .set(DataComponents.CUSTOM_DATA, CustomData.of(tag))
-                .build())
+            .set(DataComponents.CUSTOM_DATA, CustomData.of(tag))
+            .build())
 
         // Add to player's inventory
         player.inventory.placeItemBackInInventory(item)
@@ -301,9 +311,17 @@ object CratesManager {
     // This method is massive, but it handles a lot of things!
     suspend fun openCrate(player: ServerPlayer, crate: Crate, openData: CrateOpenData, isForced: Boolean): Boolean {
         // TODO: Check crate validity
+        val attemptResult = CrateOpenAttemptEvent.EVENT.invoker().onCrateOpenAttempt(player, crate, openData, isForced)
+        if (attemptResult != InteractionResult.PASS) {
+            invokeCrateFailedEvent(player, crate, openData, isForced, CrateOpenFailedEvent.Reason.ATTEMPT_CANCELLED)
+            return false
+        }
+
         interactionLimiter[player.uuid]?.let {
-            if ((it + ConfigManager.CONFIG.interactionLimiter) > System.currentTimeMillis())
+            if ((it + ConfigManager.CONFIG.interactionLimiter) > System.currentTimeMillis()) {
+                invokeCrateFailedEvent(player, crate, openData, isForced, CrateOpenFailedEvent.Reason.INTERACTION_LIMITED)
                 return false
+            }
         }
 
         interactionLimiter[player.uuid] = System.currentTimeMillis()
@@ -311,6 +329,7 @@ object CratesManager {
         // Check if the player is already opening a crate
         if (OpeningManager.getInstance(player.uuid) != null) {
             handleCrateFail(player, crate, openData)
+            invokeCrateFailedEvent(player, crate, openData, isForced, CrateOpenFailedEvent.Reason.ALREADY_OPENING)
             Lang.ERROR_ALREADY_OPENING.forEach {
                 player.sendMessage(crate.parsePlaceholders(it).asNative(player))
             }
@@ -331,6 +350,7 @@ object CratesManager {
         // Permission check
         if (!isForced && crate.permission.isNotEmpty() && !Permissions.check(player, crate.permission)) {
             handleCrateFail(player, crate, openData)
+            invokeCrateFailedEvent(player, crate, openData, isForced, CrateOpenFailedEvent.Reason.NO_PERMISSION)
             Lang.ERROR_NO_PERMISSION.forEach {
                 player.sendMessage(crate.parsePlaceholders(it).asNative(player))
             }
@@ -340,6 +360,7 @@ object CratesManager {
         // Inventory space check
         if (!isForced && crate.inventorySpace > 0 && player.inventory.items.count { it.isEmpty } < crate.inventorySpace) {
             handleCrateFail(player, crate, openData)
+            invokeCrateFailedEvent(player, crate, openData, isForced, CrateOpenFailedEvent.Reason.INVENTORY_SPACE)
             Lang.ERROR_INVENTORY_SPACE.forEach {
                 player.sendMessage(crate.parsePlaceholders(it).asNative(player))
             }
@@ -350,6 +371,7 @@ object CratesManager {
         if (crate.cost != null && crate.cost.amount > 0) {
             val service = EconomyManager.getService(crate.cost.provider) ?: run {
                 handleCrateFail(player, crate, openData)
+                invokeCrateFailedEvent(player, crate, openData, isForced, CrateOpenFailedEvent.Reason.INVALID_ECONOMY_PROVIDER)
                 Utils.printError("Crate ${crate.id} has an invalid economy provider '${crate.cost.provider}'. Valid providers are: ${EconomyManager.getServices().keys.joinToString(", ")}")
                 Lang.ERROR_ECONOMY_PROVIDER.forEach {
                     player.sendMessage(crate.parsePlaceholders(it).asNative(player))
@@ -358,6 +380,7 @@ object CratesManager {
             }
             if (service.balance(player, crate.cost.currency) < crate.cost.amount) {
                 handleCrateFail(player, crate, openData)
+                invokeCrateFailedEvent(player, crate, openData, isForced, CrateOpenFailedEvent.Reason.INSUFFICIENT_FUNDS)
                 Lang.ERROR_COST.forEach {
                     player.sendMessage(crate.parsePlaceholders(it).asNative(player))
                 }
@@ -367,16 +390,25 @@ object CratesManager {
 
         val storage = SkiesCrates.INSTANCE.storage
 
-        val playerData = storage.getUser(player.uuid)
+        val playerData = storage.getUserAsync(player.uuid).await()
 
         // Check for a cooldown, if one is present
         if (crate.cooldown > 0) {
             val lastOpened = playerData.getCrateCooldown(crate)
+            val cooldownTime = lastOpened?.let { it + (crate.cooldown * 1000) }
+            CrateCooldownCheckEvent.EVENT.invoker().onCrateCooldownCheck(
+                player,
+                crate,
+                openData,
+                lastOpened,
+                cooldownTime,
+                cooldownTime?.let { System.currentTimeMillis() < it } ?: false
+            )
             if (lastOpened != null) {
-                val cooldownTime = lastOpened + (crate.cooldown * 1000)
-                if (System.currentTimeMillis() < cooldownTime) {
+                if (cooldownTime != null && System.currentTimeMillis() < cooldownTime) {
                     withContext(MinecraftDispatcher(player.server)) {
                         handleCrateFail(player, crate, openData)
+                        invokeCrateFailedEvent(player, crate, openData, isForced, CrateOpenFailedEvent.Reason.COOLDOWN)
                         Lang.ERROR_COOLDOWN.forEach {
                             player.sendMessage(crate.parsePlaceholders(
                                 it.replace("%cooldown%", Utils.getFormattedTime((cooldownTime - System.currentTimeMillis()) / 1000))
@@ -392,6 +424,7 @@ object CratesManager {
         if (crate.rewards.isEmpty()) {
             withContext(MinecraftDispatcher(player.server)) {
                 handleCrateFail(player, crate, openData)
+                invokeCrateFailedEvent(player, crate, openData, isForced, CrateOpenFailedEvent.Reason.NO_REWARDS)
                 Lang.ERROR_NO_REWARDS.forEach {
                     player.sendMessage(crate.parsePlaceholders(it).asNative(player))
                 }
@@ -402,18 +435,59 @@ object CratesManager {
         // Check for any keys needed
         if (!isForced && crate.keys.isNotEmpty()) {
             if (!withContext(MinecraftDispatcher(player.server)) {
-                    val results = crate.keys.entries.associate { (keyId, amount) ->
-                        val key = ConfigManager.KEYS[keyId] ?: run {
-                            return@associate keyId to KeyCheckResult.NOT_FOUND
-                        }
+                // builds a list of key ids held by the player (main and off hand) for the hold_key setting
+                    val heldKeyIds = if (crate.holdKey) {
+                        buildSet {
+                            val mainHand = player.inventory.items[player.inventory.selected]
+                            if (!mainHand.isEmpty) {
+                                KeyManager.getKeyOrNull(mainHand)?.id?.let { add(it) }
+                            }
 
-                        keyId to KeyManager.checkPlayerForKeys(player, playerData, key, amount, crate.holdKey)
+                            val offhand = player.offhandItem
+                            if (!offhand.isEmpty) {
+                                KeyManager.getKeyOrNull(offhand)?.id?.let { add(it) }
+                            }
+                        }
+                    } else {
+                        emptySet()
+                    }
+
+                    val failedResults = mutableListOf<Map.Entry<String, KeyCheckResult>>()
+                    for (group in crate.keys.groups) {
+                        val requiresHeldKey = crate.holdKey && group.keys.any { it in heldKeyIds }
+                        val results = group.entries.associate { (keyId, amount) ->
+                            val key = ConfigManager.KEYS[keyId]
+                            val baseResult = key?.let {
+                                KeyManager.checkPlayerForKeys(player, playerData, it, amount, false)
+                            } ?: KeyCheckResult.NOT_FOUND
+                            val result = when {
+                                baseResult == KeyCheckResult.NOT_FOUND || baseResult == KeyCheckResult.INVALID -> baseResult
+                                crate.holdKey && !requiresHeldKey -> KeyCheckResult.NOT_HOLDING
+                                else -> baseResult
+                            }
+                            keyId to CrateKeyCheckEvent.EVENT.invoker().onCrateKeyCheck(
+                                player,
+                                crate,
+                                openData,
+                                keyId,
+                                key,
+                                amount,
+                                crate.holdKey,
+                                result
+                            )
+                        }
+                        if (results.values.all { it == KeyCheckResult.SUCCESS }) {
+                            openData.selectedKeys = group
+                            return@withContext true
+                        }
+                        failedResults.addAll(results.entries)
                     }
                     // Sort out the highest error return from the key checks to display to the user
-                    val highest = results.maxBy { (_, result) -> result.priority }
+                    val highest = failedResults.maxBy { (_, result) -> result.priority }
                     when (highest.value) {
                         KeyCheckResult.INVALID -> {
                             handleCrateFail(player, crate, openData)
+                            invokeCrateFailedEvent(player, crate, openData, isForced, CrateOpenFailedEvent.Reason.INVALID_KEY)
                             Lang.KEY_DUPLICATE_ALERT.forEach {
                                 player.sendMessage(it.asNative(player))
                             }
@@ -422,6 +496,7 @@ object CratesManager {
                         KeyCheckResult.NOT_FOUND -> {
                             Utils.printError("Key ${highest.key} does not exist while opening crate ${crate.id} for ${player.name.string}!")
                             handleCrateFail(player, crate, openData)
+                            invokeCrateFailedEvent(player, crate, openData, isForced, CrateOpenFailedEvent.Reason.KEY_NOT_FOUND)
                             Lang.ERROR_KEY_NOT_FOUND.forEach {
                                 player.sendMessage(crate.parsePlaceholders(
                                     it.replace("%key_id%", highest.key)
@@ -431,6 +506,7 @@ object CratesManager {
                         }
                         KeyCheckResult.NOT_HOLDING -> {
                             handleCrateFail(player, crate, openData)
+                            invokeCrateFailedEvent(player, crate, openData, isForced, CrateOpenFailedEvent.Reason.KEY_NOT_HOLDING)
                             Lang.ERROR_HOLD_KEYS.forEach {
                                 player.sendMessage(crate.parsePlaceholders(
                                     it.replace("%key_id%", highest.key)
@@ -440,6 +516,7 @@ object CratesManager {
                         }
                         KeyCheckResult.NOT_ENOUGH -> {
                             handleCrateFail(player, crate, openData)
+                            invokeCrateFailedEvent(player, crate, openData, isForced, CrateOpenFailedEvent.Reason.NOT_ENOUGH_KEYS)
                             Lang.ERROR_MISSING_KEYS.forEach {
                                 player.sendMessage(crate.parsePlaceholders(it).asNative(player))
                             }
@@ -447,8 +524,8 @@ object CratesManager {
                         }
                         KeyCheckResult.SUCCESS -> {}
                     }
-                    true
-                }) return false
+                    false
+            }) return false
         }
 
         // Check for crate item
@@ -458,6 +535,7 @@ object CratesManager {
                 if (!player.inventory.contains { getCrateOrNull(it)?.id == crate.id }) {
                     contains = false
                     handleCrateFail(player, crate, openData)
+                    invokeCrateFailedEvent(player, crate, openData, isForced, CrateOpenFailedEvent.Reason.NO_CRATE_ITEM)
                     Lang.ERROR_NO_CRATE.forEach {
                         player.sendMessage(crate.parsePlaceholders(it).asNative(player))
                     }
@@ -466,6 +544,8 @@ object CratesManager {
             if (!contains) return false
         }
 
+        var cooldownAppliedAt: Long? = null
+
         // Take cost of opening the crate
         if (!isForced) {
             // Remove balance if needed
@@ -473,6 +553,7 @@ object CratesManager {
                 val service = EconomyManager.getService(crate.cost.provider) ?: run {
                     withContext(MinecraftDispatcher(player.server)) {
                         handleCrateFail(player, crate, openData)
+                        invokeCrateFailedEvent(player, crate, openData, isForced, CrateOpenFailedEvent.Reason.INVALID_ECONOMY_PROVIDER)
                         Utils.printError("Crate ${crate.id} has an invalid economy provider '${crate.cost.provider}'. Valid providers are: ${EconomyManager.getServices().keys.joinToString(", ")}")
                         Lang.ERROR_ECONOMY_PROVIDER.forEach {
                             player.sendMessage(crate.parsePlaceholders(it).asNative(player))
@@ -483,195 +564,247 @@ object CratesManager {
                 if (!service.withdraw(player, crate.cost.amount, crate.cost.currency)) {
                     withContext(MinecraftDispatcher(player.server)) {
                         handleCrateFail(player, crate, openData)
+                        invokeCrateFailedEvent(player, crate, openData, isForced, CrateOpenFailedEvent.Reason.BALANCE_CHANGED)
                         Lang.ERROR_BALANCE_CHANGED.forEach {
                             player.sendMessage(crate.parsePlaceholders(it).asNative(player))
                         }
                     }
                     return false
                 }
+                CrateCostChargeEvent.EVENT.invoker().onCrateCostCharge(player, crate, openData, crate.cost)
             }
 
             // Apply a cooldown
             if (crate.cooldown > 0) {
-                playerData.addCrateCooldown(crate, System.currentTimeMillis())
-            }
-
-            // Take keys if needed
-            if (crate.keys.isNotEmpty()) {
-                // TODO: I dont like this code very much, but need to figure out a better way
-                if (!withContext(MinecraftDispatcher(player.server)) {
-                        for ((keyId, amount) in crate.keys) {
-                            var removed = 0
-                            val key = ConfigManager.KEYS[keyId] ?: run {
-                                Utils.printError("Key $keyId does not exist while opening crate ${crate.id} for ${player.name.string}!")
-                                Lang.ERROR_KEY_NOT_FOUND.forEach {
-                                    player.sendMessage(crate.parsePlaceholders(
-                                        it.replace("%key_id%", keyId)
-                                    ).asNative(player))
-                                }
-                                return@withContext false
-                            }
-
-                            if (key.virtual) {
-                                if (!playerData.removeKeys(key, amount)) {
-                                    Utils.printError("Failed to remove $amount keys from ${player.name.string} for crate ${crate.id}, but they were present in the check!")
-                                    Lang.ERROR_KEYS_CHANGED.forEach {
-                                        player.sendMessage(crate.parsePlaceholders(
-                                            it.replace("%key_id%", keyId)
-                                        ).asNative(player))
-                                    }
-                                    return@withContext false
-                                }
-                                removed += amount
-                            } else {
-                                val keySlots = player.inventory.items.withIndex().filter { (_, stack) ->
-                                    if (stack.isEmpty) return@filter false
-                                    KeyManager.getKeyOrNull(stack)?.id == keyId
-                                }.associate { (slot, stack) -> slot to stack }.toMutableMap()
-
-                                player.offhandItem.let { offhand ->
-                                    if (!offhand.isEmpty && KeyManager.getKeyOrNull(offhand)?.id == keyId) {
-                                        keySlots[Inventory.SLOT_OFFHAND] = offhand
-                                    }
-                                }
-
-                                // convert keySlots into a keys list that is sorted by slot number, with player.inventory.selected and Inventory.SLOT_OFFHAND first
-                                val sortedKeys = keySlots.entries.sortedBy { (slot, _) ->
-                                    when (slot) {
-                                        player.inventory.selected -> -2
-                                        Inventory.SLOT_OFFHAND -> -1
-                                        else -> slot
-                                    }
-                                }.map { (_, stack) -> stack }
-
-                                for (stack in sortedKeys) {
-                                    val stackSize = stack.count
-                                    if (removed + stackSize >= amount) {
-                                        KeyManager.markStackUsed(stack, key, keyId, player)
-                                        stack.shrink(amount - removed)
-                                        removed += (amount - removed)
-                                        break
-                                    } else {
-                                        KeyManager.markStackUsed(stack, key, keyId, player)
-                                        stack.shrink(stackSize)
-                                        removed += stackSize
-                                    }
-                                }
-                            }
-
-                            if (removed != amount) {
-                                // This should never happen, but just in case
-                                Utils.printError("Somehow the ${player.name.string} had $amount keys on check, but we removed $removed instead!")
-                                Lang.ERROR_KEYS_CHANGED.forEach {
-                                    player.sendMessage(crate.parsePlaceholders(
-                                        it.replace("%key_id%", keyId)
-                                    ).asNative(player))
-                                }
-                                return@withContext false
-                            }
-                        }
-                        return@withContext true
-                    }) return false
-            }
-
-            // Take crate item, if it was an inventory open
-            if (openData.itemStack != null) {
-                withContext(MinecraftDispatcher(player.server)) {
-                    openData.itemStack.count -= 1
-                }
+                cooldownAppliedAt = System.currentTimeMillis()
             }
         }
 
-        playerData.addCrateUse(crate)
-
         return withContext(MinecraftDispatcher(player.server)) {
-            if (!storage.saveUserAsync(playerData).get()) {
-                Utils.printError("Failed to save user data after opening a crate for ${player.name.string}! Check elsewhere for errors.")
-                Lang.ERROR_STORAGE.forEach {
-                    player.sendMessage(it.asNative())
-                }
-                return@withContext false
-            }
-
-            Lang.CRATE_OPENING.forEach {
-                player.sendMessage(crate.parsePlaceholders(it).asNative(player))
-            }
-
             val rewardBag = crate.generateRewardBag(playerData)
             if (rewardBag.size() <= 0) {
                 handleCrateFail(player, crate, openData)
+                invokeCrateFailedEvent(player, crate, openData, isForced, CrateOpenFailedEvent.Reason.NO_REWARDS)
                 Lang.ERROR_NO_REWARDS.forEach {
                     player.sendMessage(crate.parsePlaceholders(it).asNative(player))
                 }
                 return@withContext false
             }
 
-            if (crate.animation.isEmpty()) {
+            var immediateReward: Reward? = null
+            var opening: OpeningInstance? = null
+            val pendingRewards = if (crate.animation.isEmpty()) {
                 // TODO: Update this probably. No option for selecting how many
                 val reward = rewardBag.next() ?: run {
                     handleCrateFail(player, crate, openData)
+                    invokeCrateFailedEvent(player, crate, openData, isForced, CrateOpenFailedEvent.Reason.NO_REWARDS)
                     Lang.ERROR_NO_REWARDS.forEach {
                         player.sendMessage(crate.parsePlaceholders(it).asNative(player))
                     }
                     return@withContext false
                 }
-                reward.giveReward(player, crate)
-
-                if (reward.getPlayerLimit() > 0) {
-                    playerData.addRewardUse(crate, reward)
-                    storage.saveUserAsync(playerData)
-                }
-
-                CrateOpenedEvent.EVENT.invoker().onCrateOpened(player, crate, openData, listOf(reward))
-
-                return@withContext true
-            }
-
-            val animation = OpeningManager.getAnimation(crate.animation)?.instantiate() ?: run {
-                handleCrateFail(player, crate, openData)
-                Lang.ERROR_INVALID_ANIMATION.forEach {
-                    player.sendMessage(crate.parsePlaceholders(it).asNative(player))
-                }
-                return@withContext false
-            }
-
-            val opening = when (animation) {
-                is InventoryOpeningAnimation -> {
-                    InventoryOpeningInstance(player, crate, animation, rewardBag, openData)
-                }
-                is WorldOpeningAnimation -> {
-                    val positionData = openData.location ?: run {
-                        handleCrateFail(player, crate, openData)
-                        Utils.printError("No position data found for world opening animation ${crate.animation} for crate ${crate.id} for player ${player.name.string}!")
-                        Lang.ERROR_INVALID_ANIMATION.forEach {
-                            player.sendMessage(crate.parsePlaceholders(it).asNative(player))
-                        }
-                        return@withContext false
-                    }
-                    val crateInstance = getCrateFromPos(positionData) ?: run {
-                        handleCrateFail(player, crate, openData)
-                        Utils.printError("No crate instance found at $positionData for world opening animation ${crate.animation} for crate ${crate.id} for player ${player.name.string}!")
-                        Lang.ERROR_INVALID_ANIMATION.forEach {
-                            player.sendMessage(crate.parsePlaceholders(it).asNative(player))
-                        }
-                        return@withContext false
-                    }
-                    WorldOpeningInstance(player, crate, crateInstance, animation, rewardBag, openData)
-                }
-                else -> {
+                immediateReward = reward
+                listOf(reward)
+            } else {
+                val animation = OpeningManager.getAnimation(crate.animation)?.instantiate() ?: run {
                     handleCrateFail(player, crate, openData)
+                    invokeCrateFailedEvent(player, crate, openData, isForced, CrateOpenFailedEvent.Reason.INVALID_ANIMATION)
                     Lang.ERROR_INVALID_ANIMATION.forEach {
                         player.sendMessage(crate.parsePlaceholders(it).asNative(player))
                     }
                     return@withContext false
                 }
+
+                when (animation) {
+                    is InventoryOpeningAnimation -> {
+                        InventoryOpeningInstance(player, crate, animation, rewardBag, openData, playerData).also {
+                            opening = it
+                        }.getFinalRewards()
+                    }
+                    is WorldOpeningAnimation -> {
+                        val positionData = openData.location ?: run {
+                            handleCrateFail(player, crate, openData)
+                            invokeCrateFailedEvent(player, crate, openData, isForced, CrateOpenFailedEvent.Reason.INVALID_ANIMATION)
+                            Utils.printError("No position data found for world opening animation ${crate.animation} for crate ${crate.id} for player ${player.name.string}!")
+                            Lang.ERROR_INVALID_ANIMATION.forEach {
+                                player.sendMessage(crate.parsePlaceholders(it).asNative(player))
+                            }
+                            return@withContext false
+                        }
+                        val crateInstance = getCrateFromPos(positionData) ?: run {
+                            handleCrateFail(player, crate, openData)
+                            invokeCrateFailedEvent(player, crate, openData, isForced, CrateOpenFailedEvent.Reason.INVALID_ANIMATION)
+                            Utils.printError("No crate instance found at $positionData for world opening animation ${crate.animation} for crate ${crate.id} for player ${player.name.string}!")
+                            Lang.ERROR_INVALID_ANIMATION.forEach {
+                                player.sendMessage(crate.parsePlaceholders(it).asNative(player))
+                            }
+                            return@withContext false
+                        }
+                        WorldOpeningInstance(player, crate, crateInstance, animation, rewardBag, openData).also {
+                            opening = it
+                        }.prepareRewards()
+                    }
+                    else -> {
+                        handleCrateFail(player, crate, openData)
+                        invokeCrateFailedEvent(player, crate, openData, isForced, CrateOpenFailedEvent.Reason.INVALID_ANIMATION)
+                        Lang.ERROR_INVALID_ANIMATION.forEach {
+                            player.sendMessage(crate.parsePlaceholders(it).asNative(player))
+                        }
+                        return@withContext false
+                    }
+                }
             }
 
-            OpeningManager.addInstance(player.uuid, opening)
-            opening.setup()
+            if (pendingRewards.isEmpty()) {
+                handleCrateFail(player, crate, openData)
+                invokeCrateFailedEvent(player, crate, openData, isForced, CrateOpenFailedEvent.Reason.NO_REWARDS)
+                Lang.ERROR_NO_REWARDS.forEach {
+                    player.sendMessage(crate.parsePlaceholders(it).asNative(player))
+                }
+                return@withContext false
+            }
 
+            if (!isForced) {
+                if (!consumePhysicalKeys(player, crate, openData)) return@withContext false
+                openData.itemStack?.shrink(1)
+            }
+
+            var keysChanged = false
+            var cooldownChanged = false
+            var rewardsChanged = false
+            val updatedPlayerData = storage.updateUserAsync(player.uuid) { currentData ->
+                if (!isForced) {
+                    if (crate.cooldown > 0) {
+                        val lastOpened = currentData.getCrateCooldown(crate)
+                        if (lastOpened != null && lastOpened + (crate.cooldown * 1000) > System.currentTimeMillis()) {
+                            cooldownChanged = true
+                            return@updateUserAsync false
+                        }
+                        currentData.addCrateCooldown(crate, cooldownAppliedAt ?: System.currentTimeMillis())
+                    }
+
+                    for ((keyId, amount) in openData.selectedKeys) {
+                        val key = ConfigManager.KEYS[keyId] ?: continue
+                        if (key.virtual && !currentData.removeKeys(key, amount)) {
+                            keysChanged = true
+                            return@updateUserAsync false
+                        }
+                    }
+                }
+
+                for (reward in pendingRewards.filter { it.getPlayerLimit() > 0 }) {
+                    if (!reward.canReceive(currentData, crate)) {
+                        rewardsChanged = true
+                        return@updateUserAsync false
+                    }
+                    currentData.addRewardUse(crate, reward)
+                }
+
+                currentData.addCrateUse(crate)
+                true
+            }.await()
+
+            if (updatedPlayerData == null) {
+                val reason = when {
+                    keysChanged -> CrateOpenFailedEvent.Reason.KEYS_CHANGED
+                    cooldownChanged -> CrateOpenFailedEvent.Reason.COOLDOWN
+                    rewardsChanged -> CrateOpenFailedEvent.Reason.NO_REWARDS
+                    else -> CrateOpenFailedEvent.Reason.STORAGE
+                }
+                Utils.printError("Failed to reserve crate data for ${player.name.string}! Check elsewhere for errors.")
+                invokeCrateFailedEvent(player, crate, openData, isForced, reason)
+                val messages = if (keysChanged) Lang.ERROR_KEYS_CHANGED else Lang.ERROR_STORAGE
+                messages.forEach {
+                    player.sendMessage(it.asNative())
+                }
+                return@withContext false
+            }
+            if (!isForced) {
+                for ((keyId, amount) in openData.selectedKeys) {
+                    val key = ConfigManager.KEYS[keyId] ?: continue
+                    if (key.virtual) {
+                        CrateKeyConsumeEvent.EVENT.invoker().onCrateKeyConsume(player, crate, openData, key, amount)
+                    }
+                }
+
+                cooldownAppliedAt?.let {
+                    CrateCooldownApplyEvent.EVENT.invoker().onCrateCooldownApply(
+                        player,
+                        crate,
+                        openData,
+                        it,
+                        crate.cooldown * 1000
+                    )
+                }
+            }
+
+            Lang.CRATE_OPENING.forEach {
+                player.sendMessage(crate.parsePlaceholders(it).asNative(player))
+            }
+
+            CrateOpenEvent.EVENT.invoker().onCrateOpen(player, crate, openData, isForced)
+            if (immediateReward != null) {
+                immediateReward.giveReward(player, crate)
+                CrateOpenedEvent.EVENT.invoker().onCrateOpened(player, crate, openData, listOf(immediateReward))
+                return@withContext true
+            }
+
+            val preparedOpening = opening ?: return@withContext false
+            OpeningManager.addInstance(player.uuid, preparedOpening)
+            preparedOpening.setup()
             return@withContext true
         }
+    }
+
+    private suspend fun consumePhysicalKeys(player: ServerPlayer, crate: Crate, openData: CrateOpenData): Boolean {
+        for ((keyId, amount) in openData.selectedKeys) {
+            val key = ConfigManager.KEYS[keyId] ?: continue
+            if (key.virtual) continue
+
+            val keySlots = player.inventory.items.withIndex().filter { (_, stack) ->
+                !stack.isEmpty && KeyManager.getKeyOrNull(stack)?.id == keyId
+            }.associate { (slot, stack) -> slot to stack }.toMutableMap()
+
+            player.offhandItem.let { offhand ->
+                if (!offhand.isEmpty && KeyManager.getKeyOrNull(offhand)?.id == keyId) {
+                    keySlots[Inventory.SLOT_OFFHAND] = offhand
+                }
+            }
+
+            val sortedKeys = keySlots.entries.sortedBy { (slot, _) ->
+                when (slot) {
+                    player.inventory.selected -> -2
+                    Inventory.SLOT_OFFHAND -> -1
+                    else -> slot
+                }
+            }.map { (_, stack) -> stack }
+
+            var removed = 0
+            for (stack in sortedKeys) {
+                val removeAmount = minOf(stack.count, amount - removed)
+                if (!KeyManager.markStackUsedAsync(stack, key, keyId, player).await()) {
+                    Lang.KEY_DUPLICATE_ALERT.forEach {
+                        player.sendMessage(it.asNative(player))
+                    }
+                    return false
+                }
+                stack.shrink(removeAmount)
+                removed += removeAmount
+                if (removed >= amount) break
+            }
+
+            if (removed != amount) {
+                Utils.printError("Somehow ${player.name.string} had $amount keys on check, but only $removed could be removed!")
+                invokeCrateFailedEvent(player, crate, openData, false, CrateOpenFailedEvent.Reason.KEYS_CHANGED)
+                Lang.ERROR_KEYS_CHANGED.forEach {
+                    player.sendMessage(crate.parsePlaceholders(it.replace("%key_id%", keyId)).asNative(player))
+                }
+                return false
+            }
+
+            CrateKeyConsumeEvent.EVENT.invoker().onCrateKeyConsume(player, crate, openData, key, removed)
+        }
+        return true
     }
 
     fun previewCrate(player: ServerPlayer, crate: Crate) {
@@ -691,7 +824,12 @@ object CratesManager {
         }
         Utils.printDebug("previewCrate - Preview found, opening")
 
-        PreviewInventory(player, crate, preview).open()
+        SkiesCrates.INSTANCE.storage.getUserAsync(player.uuid).thenAccept { userData ->
+            player.server.execute {
+                PreviewInventory(player, crate, preview, userData).open()
+                CratePreviewEvent.EVENT.invoker().onCratePreview(player, crate, preview)
+            }
+        }
     }
 
     private fun handleCrateFail(player: ServerPlayer, crate: Crate, openData: CrateOpenData) {
@@ -712,6 +850,16 @@ object CratesManager {
             player.addDeltaMovement(velocity)
             player.hurtMarked = true
         }
+    }
+
+    private fun invokeCrateFailedEvent(
+        player: ServerPlayer,
+        crate: Crate,
+        openData: CrateOpenData,
+        isForced: Boolean,
+        reason: CrateOpenFailedEvent.Reason,
+    ) {
+        CrateOpenFailedEvent.EVENT.invoker().onCrateOpenFailed(player, crate, openData, isForced, reason)
     }
 
     fun getCrateOrNull(itemStack: ItemStack): Crate? {
